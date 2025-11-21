@@ -28,8 +28,8 @@ if script_dir == "":
 script_dir = os.path.realpath(script_dir)
 
 USERNAME = os.getenv('USER_NAME', default = 'cs3214')
-PASSWORD = os.getenv('USER_PASS', default = 'kjhlAOF)*@$HL')
-SECRET = os.getenv('SECRET', default = 'a real secret')
+PASSWORD = os.getenv('USER_PASS', default = 'kjhAlOF)*@$HL')
+SECRET = os.getenv('SECRET_KEYFILE', default = f'{script_dir}/oct_key_256.json')
 
 def encode(s):
     return s.encode('utf-8')
@@ -2808,7 +2808,7 @@ if __name__ == '__main__':
         args = preargs + [server_path, "-p", str(port), "-R", base_dir] + postargs
         output_file = None
         env = dict(os.environ)
-        for variable, value in [('USER_NAME', USERNAME), ('USER_PASS', PASSWORD), ('SECRET', SECRET)]:
+        for variable, value in [('USER_NAME', USERNAME), ('USER_PASS', PASSWORD), ('SECRET_KEYFILE', SECRET)]:
             if variable not in env:
                 env[variable] = value
 

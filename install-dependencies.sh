@@ -12,6 +12,7 @@ BASE=`pwd`
 test -d ${BASE}/deps || mkdir ${BASE}/deps
 git clone https://github.com/akheron/jansson.git
 (cd jansson;
+    git checkout v2.14.1;
     autoreconf -fi;
     ./configure --prefix=${BASE}/deps;
     make -j 40 install
@@ -19,8 +20,13 @@ git clone https://github.com/akheron/jansson.git
 
 git clone https://git@github.com/benmcollins/libjwt.git
 (cd libjwt;
-    git checkout v1.17.2;
-    autoreconf -fi;
-    env PKG_CONFIG_PATH=../deps/lib/pkgconfig:${PKG_CONFIG_PATH} ./configure --prefix=${BASE}/deps;
+    git checkout v3.2.3;
+    mkdir build
+    cd build
+    PKG_CONFIG_PATH=${BASE}/deps/lib/pkgconfig:${PKG_CONFIG_PATH} \
+        cmake \
+            -DCMAKE_INSTALL_PREFIX="${BASE}/deps"  \
+            -DCMAKE_INSTALL_LIBDIR=lib \
+            ..
     make -j 40 install
 )
