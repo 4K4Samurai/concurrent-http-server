@@ -1,20 +1,27 @@
 
-# change this number as per instruction to avoid conflicts.
+# change this number as per instruction to avoid conflicts with other students.
 PORT=10000
 HOST=localhost
 
 # to test against a working implementation (and see the intended responses)
 # change this variable, e.g.
-URL=http://hazelnut.rlogin:12345
+#URL=http://hazelnut.rlogin:12345
 # adjust these to match your server's username/password
-USER_NAME=userf24
-USER_PASS=fall24
+USER_NAME=userf25
+USER_PASS=fall25
 #URL=http://${HOST}:${PORT}
+
+if [ ${URL}x = ""x ]
+then
+    echo Change the script to set '$URL' first to one of the alternatives
+    exit
+fi
+
 
 echo Your server should be running on host $HOST port $PORT
 echo You may need to start it with, e.g.
 echo
-echo USER_NAME=${USER_NAME} USER_PASS=${USER_PASS} SECRET=zzzz ./server -R ../root -p $PORT
+echo USER_NAME=${USER_NAME} USER_PASS=${USER_PASS} SECRET_KEYFILE=../tests/oct_key_256.json ./server -R ../root -p $PORT
 echo 
 echo This script is not intended as an automatic test.
 echo You should use it to understand the required functionality
