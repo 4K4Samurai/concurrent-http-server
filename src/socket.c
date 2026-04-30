@@ -46,6 +46,8 @@ socket_open_bind_listen(char * port_number_string, int backlog)
     hint.ai_flags = AI_PASSIVE |    // we're looking for an address to bind to
                     AI_NUMERICSERV; // service port is numeric, don't look in /etc/services
 
+    hint.ai_family = AF_INET6; // dual-bind allows to also accept IPv4 clients too
+
     hint.ai_protocol = IPPROTO_TCP; // only interested in TCP
     int rc = getaddrinfo(NULL, port_number_string, &hint, &info);
     if (rc != 0) {
@@ -73,8 +75,6 @@ socket_open_bind_listen(char * port_number_string, int backlog)
         /* Skip any non-IPv4 addresses.  
          * Adding support for protocol independence/IPv6 is part of the project.
          */
-        if (pinfo->ai_family != AF_INET)
-            continue;
 
         int s = socket(pinfo->ai_family, pinfo->ai_socktype, pinfo->ai_protocol);
         if (s == -1) {
@@ -85,6 +85,9 @@ socket_open_bind_listen(char * port_number_string, int backlog)
         // See https://stackoverflow.com/a/3233022 for a good explanation of what this does
         int opt = 1;
         setsockopt (s, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof (opt));
+
+        int off = 0;
+        setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof(off));
 
         rc = bind(s, pinfo->ai_addr, pinfo->ai_addrlen);
         if (rc == -1) {

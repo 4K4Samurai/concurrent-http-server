@@ -9,6 +9,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
+#include <pthread.h>
+#include <unistd.h>
 #include "buffer.h"
 #include "hexdump.h"
 #include "http.h"
@@ -35,23 +37,59 @@ int token_expiration_time = 24 * 60 * 60;
 char *server_root;
 
 /*
- * A non-concurrent, iterative server that serves one client at a time.
- * For each client, it handles exactly 1 HTTP transaction.
+ * Ideas and code were derived from Claude.
+ * 
+ */
+static void *
+client_thread(void *arg)
+{
+    int client_socket = *(int *)arg;
+    free(arg);
+
+    pthread_detach(pthread_self());
+
+    struct http_client client;
+    http_setup_client(&client, bufio_create(client_socket));
+
+    while (http_handle_transaction(&client))
+    {
+        ;
+    }
+
+    bufio_close(client.bufio);
+    return NULL;
+}
+
+/*
+ * Ideas and code were derived from Claude.
  */
 static void
 server_loop(char *port_string)
 {
     int accepting_socket = socket_open_bind_listen(port_string, 10000);
-    while (accepting_socket != -1) {
-        fprintf(stderr, "Waiting for client...\n");
+    while (accepting_socket != -1)
+    {
         int client_socket = socket_accept_client(accepting_socket);
         if (client_socket == -1)
+        {
             return;
+        }
 
-        struct http_client client;
-        http_setup_client(&client, bufio_create(client_socket));
-        http_handle_transaction(&client);
-        bufio_close(client.bufio);
+        int *cfd = malloc(sizeof(int));
+        if (!cfd)
+        {
+            close(client_socket);
+            continue;
+        }
+        *cfd = client_socket;
+        
+        pthread_t tid;
+        if (pthread_create(&tid, NULL, client_thread, cfd) != 0)
+        {
+            perror("pthread_create");
+            close(client_socket);
+            free(cfd);
+        }
     }
 }
 

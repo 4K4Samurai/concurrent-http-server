@@ -47,6 +47,9 @@ struct http_transaction {
     buffer_t resp_body;
 
     struct http_client *client;
+
+    bool req_wants_close; // Derived from Claude. True if client sent "Connection: close"
+    char *cookie_header; // Derived from Claude. Raw cookie
 };
 
 struct http_client {

@@ -7,6 +7,7 @@
  *
  * @author G. Back for CS 3214 Spring 2018
  */
+#define _GNU_SOURCE
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -113,6 +114,25 @@ http_process_headers(struct http_transaction *ta)
             ta->req_content_len = atoi(field_value);
         }
 
+        /*
+         * Ideas and code were derived from Claude. 
+         */
+        if (STARTS_WITH(field_name, "Connection"))
+        {
+            if (strcasestr(field_value, "close"))
+            {
+                ta->req_wants_close = true;
+            }
+        }
+
+        /*
+         * Ideas and code were derived from Claude.
+         */
+        if (STARTS_WITH(field_name, "Cookie"))
+        {
+            ta->cookie_header = strdup(field_value);
+        }
+
         /* Handle other headers here. Both field_value and field_name
          * are zero-terminated strings.
          */
@@ -156,8 +176,17 @@ start_response(struct http_transaction * ta, buffer_t *res)
     /* Hint: you must change this as you implement HTTP/1.1.
      * Respond with the highest version the client supports
      * as indicated in the version field of the request.
+     *
+     * Ideas and code were derived from Claude.
      */
-    buffer_appends(res, "HTTP/1.0 ");
+    if (ta->req_version == HTTP_1_1)
+    {
+        buffer_appends(res, "HTTP/1.1 ");
+    }
+    else
+    {
+        buffer_appends(res, "HTTP/1.0 ");
+    }
 
     switch (ta->resp_status) {
     case HTTP_OK:
@@ -289,60 +318,126 @@ guess_mime_type(char *filename)
     if (!strcasecmp(suffix, ".js"))
         return "text/javascript";
 
+    if (!strcasecmp(suffix, ".css"))
+    {
+        return "text/css";
+    }
+
+    if (!strcasecmp(suffix, ".svg"))
+    {
+        return "image/svg+xml";
+    }
+
+    if (!strcasecmp(suffix, ".mp4"))
+    {
+        return "video/mp4";
+    }
+
+    if (!strcasecmp(suffix, ".ico"))
+    {
+        return "image/x-icon";
+    }
+
     /* hint: you need to add support for (at least) .css, .svg, and .mp4
      * You can grep /etc/mime.types for the correct types */
     return "text/plain";
 }
 
-/* Handle HTTP transaction for static files. */
+/* 
+ * Handle HTTP transaction for static files. 
+ * Ideas and code were derived from Claude.
+ */
 static bool
 handle_static_asset(struct http_transaction *ta, char *basedir)
 {
     char fname[PATH_MAX];
 
-    assert (basedir != NULL || !!!"No base directory. Did you specify -R?");
     char *req_path = bufio_offset2ptr(ta->client->bufio, ta->req_path);
-    // The code below is vulnerable to an attack.  Can you see
-    // which?  Fix it to avoid indirect object reference (IDOR) attacks.
-    snprintf(fname, sizeof fname, "%s%s", basedir, req_path);
 
-    if (access(fname, R_OK) == -1) {
-        if (errno == EACCES)
-            return send_error(ta, HTTP_PERMISSION_DENIED, "Permission denied.");
-        else
-            return send_not_found(ta);
+    // Block path traversal attacks
+    if (strstr(req_path, ".."))
+    {
+        return send_error(ta, HTTP_PERMISSION_DENIED, "Permission denied.");
     }
 
-    // Determine file size
-    struct stat st;
-    int rc = stat(fname, &st);
-    /* Remove this line once your code handles this case */
-    assert (!(html5_fallback && rc == 0 && S_ISDIR(st.st_mode)));
+    // Need an HTML5 fallback so that it can resolve what file to actually serve
+    if (html5_fallback)
+    {
+        // "/" -> "/.index.html"
+        if (strcmp(req_path, "/") == 0)
+        {
+            snprintf(fname, sizeof fname, "%s/index.html", basedir);
+        }
+        else
+        {
+            snprintf(fname, sizeof fname, "%s%s", basedir, req_path);
+            struct stat st;
+            if (stat(fname, &st) != 0 || !S_ISREG(st.st_mode))
+            {
+                // try <path>.html
+                char try2[PATH_MAX];
+                snprintf(try2, sizeof try2, "%s%s.html", basedir, req_path);
+                if (stat(try2, &st) == 0 && S_ISREG(st.st_mode))
+                {
+                    snprintf(fname, sizeof fname, "%s", try2);
+                }
+                else
+                {
+                    // fallback to /200.html
+                    snprintf(fname, sizeof fname, "%s/200.html", basedir);
+                }
+            }
+        }
+    }
+    else
+    {
+        if (strcmp(req_path, "/") == 0)
+        {
+            snprintf(fname, sizeof fname, "%s/index.html", basedir);
+        }
+        else
+        {
+            snprintf(fname, sizeof fname, "%s%s", basedir, req_path);
+        }
+    }
 
-    if (rc == -1)
-        return send_error(ta, HTTP_INTERNAL_ERROR, "Could not stat file.");
+    // Use stat (not access) to check the existence and distinguish files vs dirs
+    struct stat st;
+    if (stat(fname, &st) == -1)
+    {
+        return send_not_found(ta);
+    }
+
+    if (!S_ISREG(st.st_mode))
+    {
+        return send_not_found(ta);
+    }
 
     int filefd = open(fname, O_RDONLY);
-    if (filefd == -1) {
+    if (filefd == -1)
+    {
         return send_not_found(ta);
     }
 
     ta->resp_status = HTTP_OK;
     http_add_header(&ta->resp_headers, "Content-Type", "%s", guess_mime_type(fname));
-    off_t from = 0, to = st.st_size - 1;
+    http_add_header(&ta->resp_headers, "Accept-Ranges", "bytes");
 
+    off_t from = 0, to = st.st_size - 1;
     off_t content_length = to + 1 - from;
     add_content_length(&ta->resp_headers, content_length);
 
     bool success = send_response_header(ta);
     if (!success)
+    {
         goto out;
+    }
 
-    // sendfile may send fewer bytes than requested, hence the loop
     while (success && from <= to)
+    {
         success = bufio_sendfile(ta->client->bufio, filefd, &from, to + 1 - from) > 0;
-
-out:
+    }
+out: 
     close(filefd);
     return success;
 }
@@ -386,6 +481,17 @@ http_handle_transaction(struct http_client *self)
 
     buffer_init(&ta.resp_headers, 1024);
     http_add_header(&ta.resp_headers, "Server", "CS3214-Personal-Server");
+
+    // Need to tell the client whether connection stays open
+    if (ta.req_wants_close || ta.req_version == HTTP_1_0)
+    {
+        http_add_header(&ta.resp_headers, "Connection", "close");
+    }
+    else
+    {
+        http_add_header(&ta.resp_headers, "Connection", "keep-alive");
+    }
+
     buffer_init(&ta.resp_body, 0);
 
     bool rc = false;
@@ -394,7 +500,7 @@ http_handle_transaction(struct http_client *self)
         rc = handle_api(&ta);
     } else
     if (STARTS_WITH(req_path, "/private")) {
-        /* not implemented */
+        rc = send_error(&ta, HTTP_PERMISSION_DENIED, "Not logged in.");
     } else {
         rc = handle_static_asset(&ta, server_root);
     }
@@ -402,5 +508,12 @@ http_handle_transaction(struct http_client *self)
     buffer_delete(&ta.resp_headers);
     buffer_delete(&ta.resp_body);
 
-    return rc;
+    // free the cookie header if we have allocated one
+    if (ta.cookie_header)
+    {
+        free(ta.cookie_header);
+        ta.cookie_header = NULL;
+    }
+
+    return rc && !ta.req_wants_close && ta.req_version != HTTP_1_0;
 }
