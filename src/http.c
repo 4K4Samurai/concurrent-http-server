@@ -21,6 +21,7 @@
 #include <fcntl.h>
 #include <assert.h>
 #include <linux/limits.h>
+#include <jansson.h>
 
 #include "http.h"
 #include "hexdump.h"
@@ -33,6 +34,31 @@
 #define CR "\r"
 #define STARTS_WITH(field_name, header) \
     (!strncasecmp(field_name, header, sizeof(header) - 1))
+
+/*
+ * Ideas and code were derived from Claude. 
+ */
+struct claims_ctx {
+    char *grants;
+};
+
+/*
+ * Ideas and code were derived from Claude.
+ */
+static int
+extract_claims_cb(jwt_t *jwt, jwt_config_t *config)
+{
+    jwt_value_t jval;
+    jwt_set_GET_JSON(&jval, NULL);
+    jwt_value_error_t err = jwt_claim_get(jwt, &jval);
+    if (err)
+    {
+        return err;
+    }
+    struct claims_ctx *ctx = config->ctx;
+    ctx->grants = jval.json_val;
+    return 0;
+}
 
 /* Parse HTTP request line, setting req_method, req_path, and req_version. */
 static bool
@@ -442,10 +468,289 @@ out:
     return success;
 }
 
+/*
+ * Ideas and code were derived from Claude. 
+ * Load JWT signing key from SECRET_KEYFILE env var.
+ * Caller must jwks_free() the result. 
+ */
+
+static jwk_set_t *
+load_keyfile(void)
+{
+    char *keyfilename = getenv("SECRET_KEYFILE");
+    if (keyfilename == NULL)
+    {
+        fprintf(stderr, "SECRET_KEYFILE not set\n");
+        return NULL;
+    }
+
+    return jwks_load_fromfile(NULL, keyfilename);
+}
+
+/*
+ * Ideas and code were derived from Claude.
+ * Returns allocated claims JSON string on success,
+ * NULL on failure. Caller must free() the result.
+ */
+static char *
+get_validated_claims(struct http_transaction *ta)
+{
+    if (ta->cookie_header == NULL)
+    {
+        return NULL;
+    }
+
+    char *token = NULL;
+    char *copy = strdup(ta->cookie_header);
+    if (!copy)
+    {
+        return NULL;
+    }
+
+    char *saveptr;
+    char *part = strtok_r(copy, ";", &saveptr);
+    while (part)
+    {
+        while (*part == ' ')
+        {
+            part++;
+        }
+        if (strncmp(part, "auth_jwt=", 9) == 0)
+        {
+            token = strdup(part + 9);
+            break;
+        }
+        part = strtok_r(NULL, ";", &saveptr);
+    }
+    free(copy);
+    if (!token)
+    {
+        return NULL;
+    }
+
+    jwk_set_t *keyset = load_keyfile();
+    if (!keyset)
+    {
+        free(token);
+        return NULL;
+    }
+
+    jwt_checker_t *checker = jwt_checker_new();
+    if (!checker)
+    {
+        jwks_free(keyset);
+        free(token);
+        return NULL;
+    }
+
+    const jwk_item_t *key = jwks_item_get(keyset, 0);
+    if (jwt_checker_setkey(checker, JWT_ALG_HS256, key) != 0)
+    {
+        jwt_checker_free(checker);
+        jwks_free(keyset);
+        free(token);
+        return NULL;
+    }
+
+    struct claims_ctx ctx = {
+        NULL
+    };
+
+    jwt_checker_setcb(checker, extract_claims_cb, &ctx);
+
+    int rc = jwt_checker_verify(checker, token);
+
+    jwt_checker_free(checker);
+    jwks_free(keyset);
+    free(token);
+
+    if (rc != 0)
+    {
+        free(ctx.grants);
+        return NULL;
+    }
+    return ctx.grants;
+}
+
+/*
+ * Ideas and code were derived from Claude.
+ * Handles the POST /api/login
+ */
+static bool
+handle_login(struct http_transaction *ta)
+{
+    char *expected_user = getenv("USER_NAME");
+    char *expected_pass = getenv("USER_PASS");
+    if (!expected_user || !expected_pass)
+    {
+        return send_error(ta, HTTP_INTERNAL_ERROR, "Server misconfigured");
+    }
+
+    // need to parse the JSON body
+    char *body = bufio_offset2ptr(ta->client->bufio, ta->req_body);
+    json_error_t jerr;
+    json_t *jbody = json_loadb(body, ta->req_content_len, 0, &jerr);
+    if (!jbody)
+    {
+        return send_error(ta, HTTP_BAD_REQUEST, "Invalid JSON");
+    }
+
+    const char *username;
+    const char *password;
+    if (json_unpack(jbody, "{s:s, s:s}",
+        "username", &username, "password", &password) != 0)
+        {
+            json_decref(jbody);
+            return send_error(ta, HTTP_BAD_REQUEST, "Missing username or password");
+        }
+    
+    if (strcmp(username, expected_user) != 0 ||
+        strcmp(password, expected_pass) != 0) {
+            json_decref(jbody);
+            return send_error(ta, HTTP_PERMISSION_DENIED, "Invalid credentials");
+        }
+    json_decref(jbody);
+
+    // Need to build the JWT
+    jwk_set_t *keyset = load_keyfile();
+    if (!keyset)
+    {
+        return send_error(ta, HTTP_INTERNAL_ERROR, "Could not load key");
+    }
+
+    jwt_builder_t *builder = jwt_builder_new();
+    if (!builder)
+    {
+        jwks_free(keyset);
+        return send_error(ta, HTTP_INTERNAL_ERROR, "JWT error");
+    }
+
+    // Need to set the sub claim
+    jwt_value_t jval;
+    jwt_set_SET_STR(&jval, "sub", expected_user);
+    if (jwt_builder_claim_set(builder, &jval) != 0)
+    {
+        jwt_builder_free(builder);
+        jwks_free(keyset);
+        return send_error(ta, HTTP_INTERNAL_ERROR, "JWT claim error");
+    }
+
+    // Need to set exp (the iat is added automatically by libjwt)
+    if (jwt_builder_time_offset(builder, JWT_CLAIM_EXP, token_expiration_time) != 0)
+    {
+        jwt_builder_free(builder);
+        jwks_free(keyset);
+        return send_error(ta, HTTP_INTERNAL_ERROR, "JWT exp error");
+    }
+
+    const jwk_item_t *key = jwks_item_get(keyset, 0);
+    if (jwt_builder_setkey(builder, JWT_ALG_HS256, key) != 0)
+    {
+        jwt_builder_free(builder);
+        jwks_free(keyset);
+        return send_error(ta, HTTP_INTERNAL_ERROR, "JWT key error");
+    }
+
+    struct claims_ctx ctx = {
+        NULL
+    };
+    jwt_builder_setcb(builder, extract_claims_cb, &ctx);
+
+    char *encoded = jwt_builder_generate(builder);
+    jwt_builder_free(builder);
+    jwks_free(keyset);
+
+    if (!encoded)
+    {
+        free(ctx.grants);
+        return send_error(ta, HTTP_INTERNAL_ERROR, "JWT generate error");
+    }
+
+    // need to set cookie
+    http_add_header(&ta->resp_headers, "Set-Cookie",
+                    "auth_jwt=%s; Path=/; HttpOnly; SameSite=Lax; Max-Age=%d",
+                    encoded, token_expiration_time);
+    free(encoded);
+
+    // Respond with claims as JSON body
+    ta->resp_status = HTTP_OK;
+    http_add_header(&ta->resp_headers, "Content-Type", "application/json");
+    if (ctx.grants)
+    {
+        buffer_appends(&ta->resp_body, ctx.grants);
+        free(ctx.grants);
+    }
+    else
+    {
+        buffer_appends(&ta->resp_body, "{}");
+    }
+    return send_response(ta);
+}
+
+/*
+ * Ideas and code were derived from Claude.
+ * Handle the GET /api/login - return claims
+ * if authenticated, {} if not.
+ */
+static bool
+handle_login_get(struct http_transaction *ta)
+{
+    char *claims= get_validated_claims(ta);
+    ta->resp_status = HTTP_OK;
+    http_add_header(&ta->resp_headers, "Content-Type", "application/json");
+    if (claims)
+    {
+        buffer_appends(&ta->resp_body, claims);
+        free(claims);
+    }
+    else
+    {
+        buffer_appends(&ta->resp_body, "{}");
+    }
+    return send_response(ta);
+}
+
+/*
+ * Ideas and code were derived from Claude.
+ * Handle the POST /api/logout - clear the cookie
+ */
+static bool
+handle_logout(struct http_transaction *ta)
+{
+    http_add_header(&ta->resp_headers, "Set-Cookie",
+                    "auth_jwt=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0");
+    ta->resp_status = HTTP_OK;
+    http_add_header(&ta->resp_headers, "Content-Type", "application/json");
+    buffer_appends(&ta->resp_body, "{}");
+    return send_response(ta);
+}
+
+/*
+ * Ideas and code were derived from Claude.
+ */
 static bool
 handle_api(struct http_transaction *ta)
 {
-    return send_error(ta, HTTP_NOT_FOUND, "API not implemented");
+    char *req_path = bufio_offset2ptr(ta->client->bufio, ta->req_path);
+
+    if (STARTS_WITH(req_path, "/api/login"))
+    {
+        if (ta->req_method == HTTP_POST)
+        {
+            return handle_login(ta);
+        }
+        else
+        {
+            return handle_login_get(ta);
+        }
+    }
+
+    if (STARTS_WITH(req_path, "/api/logout"))
+    {
+        return handle_logout(ta);
+    }
+
+    return send_error(ta, HTTP_NOT_FOUND, "API endpoint not found");
 }
 
 /* Set up an http client, associating it with a bufio buffer. */
@@ -500,9 +805,16 @@ http_handle_transaction(struct http_client *self)
         rc = handle_api(&ta);
     } else
     if (STARTS_WITH(req_path, "/private")) {
-        rc = send_error(&ta, HTTP_PERMISSION_DENIED, "Not logged in.");
-    } else {
-        rc = handle_static_asset(&ta, server_root);
+        char *claims = get_validated_claims(&ta);
+        if (claims == NULL)
+        {
+            rc = send_error(&ta, HTTP_PERMISSION_DENIED, "Not logged in.");
+        }
+        else
+        {
+            free(claims);
+            rc = handle_static_asset(&ta, server_root);
+        }
     }
 
     buffer_delete(&ta.resp_headers);
