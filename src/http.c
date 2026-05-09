@@ -21,6 +21,7 @@
 #include <fcntl.h>
 #include <assert.h>
 #include <linux/limits.h>
+#include <dirent.h>
 #include <jansson.h>
 
 #include "http.h"
@@ -769,6 +770,50 @@ handle_logout(struct http_transaction *ta)
  * Ideas and code were derived from Claude.
  */
 static bool
+handle_video_api(struct http_transaction *ta)
+{
+    json_t *array = json_array();
+    if (!array)
+        return send_error(ta, HTTP_INTERNAL_ERROR, "Out of memory");
+
+    DIR *dir = opendir(server_root);
+    if (dir) {
+        struct dirent *entry;
+        while ((entry = readdir(dir)) != NULL) {
+            char *name = entry->d_name;
+            size_t len = strlen(name);
+            if (len < 4 || strcasecmp(name + len - 4, ".mp4") != 0)
+                continue;
+
+            char path[PATH_MAX];
+            snprintf(path, sizeof path, "%s/%s", server_root, name);
+
+            struct stat st;
+            if (stat(path, &st) == -1 || !S_ISREG(st.st_mode))
+                continue;
+
+            json_t *obj = json_pack("{s:s, s:I}",
+                                    "name", name,
+                                    "size", (json_int_t)st.st_size);
+            if (obj)
+                json_array_append_new(array, obj);
+        }
+        closedir(dir);
+    }
+
+    char *body = json_dumps(array, JSON_COMPACT);
+    json_decref(array);
+    if (!body)
+        return send_error(ta, HTTP_INTERNAL_ERROR, "JSON encode error");
+
+    ta->resp_status = HTTP_OK;
+    http_add_header(&ta->resp_headers, "Content-Type", "application/json");
+    buffer_appends(&ta->resp_body, body);
+    free(body);
+    return send_response(ta);
+}
+
+static bool
 handle_api(struct http_transaction *ta)
 {
     char *req_path = bufio_offset2ptr(ta->client->bufio, ta->req_path);
@@ -788,6 +833,11 @@ handle_api(struct http_transaction *ta)
     if (STARTS_WITH(req_path, "/api/logout"))
     {
         return handle_logout(ta);
+    }
+
+    if (STARTS_WITH(req_path, "/api/video"))
+    {
+        return handle_video_api(ta);
     }
 
     return send_error(ta, HTTP_NOT_FOUND, "API endpoint not found");
