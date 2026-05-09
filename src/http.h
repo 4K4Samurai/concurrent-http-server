@@ -3,6 +3,7 @@
 
 #include <jwt.h>
 #include <stdbool.h>
+#include <sys/types.h>
 
 #include "buffer.h"
 struct bufio;
@@ -29,7 +30,8 @@ enum http_response_status {
     HTTP_REQUEST_TOO_LONG = 414,
     HTTP_INTERNAL_ERROR = 500,
     HTTP_NOT_IMPLEMENTED = 501,
-    HTTP_SERVICE_UNAVAILABLE = 503
+    HTTP_SERVICE_UNAVAILABLE = 503,
+    HTTP_RANGE_NOT_SATISFIABLE = 416
 };
 
 struct http_transaction {
@@ -39,7 +41,9 @@ struct http_transaction {
     size_t req_path;        // expressed as offset into the client's bufio.
     size_t req_body;        // ditto
     int req_content_len;    // content length of request body
-
+    bool req_has_range;
+    off_t req_range_start;
+    off_t req_range_end;    /* -1 = open-ended (to EOF) */
 
     /* response related fields */
     enum http_response_status resp_status;

@@ -159,6 +159,20 @@ http_process_headers(struct http_transaction *ta)
             ta->cookie_header = strdup(field_value);
         }
 
+        if (STARTS_WITH(field_name, "Range"))
+        {
+            long long start, end;
+            if (sscanf(field_value, "bytes=%lld-%lld", &start, &end) == 2) {
+                ta->req_has_range = true;
+                ta->req_range_start = (off_t)start;
+                ta->req_range_end = (off_t)end;
+            } else if (sscanf(field_value, "bytes=%lld-", &start) == 1) {
+                ta->req_has_range = true;
+                ta->req_range_start = (off_t)start;
+                ta->req_range_end = -1;
+            }
+        }
+
         /* Handle other headers here. Both field_value and field_name
          * are zero-terminated strings.
          */
@@ -244,6 +258,9 @@ start_response(struct http_transaction * ta, buffer_t *res)
         break;
     case HTTP_SERVICE_UNAVAILABLE:
         buffer_appends(res, "503 Service Unavailable");
+        break;
+    case HTTP_RANGE_NOT_SATISFIABLE:
+        buffer_appends(res, "416 Range Not Satisfiable");
         break;
     case HTTP_INTERNAL_ERROR:
         buffer_appends(res, "500 Internal Server Error");
@@ -445,11 +462,34 @@ handle_static_asset(struct http_transaction *ta, char *basedir)
         return send_not_found(ta);
     }
 
-    ta->resp_status = HTTP_OK;
-    http_add_header(&ta->resp_headers, "Content-Type", "%s", guess_mime_type(fname));
     http_add_header(&ta->resp_headers, "Accept-Ranges", "bytes");
 
     off_t from = 0, to = st.st_size - 1;
+
+    if (ta->req_has_range) {
+        from = ta->req_range_start;
+        off_t range_end = ta->req_range_end;
+        to = (range_end == -1 || range_end >= st.st_size)
+             ? st.st_size - 1 : range_end;
+
+        if (from < 0 || from >= st.st_size || from > to) {
+            close(filefd);
+            ta->resp_status = HTTP_RANGE_NOT_SATISFIABLE;
+            http_add_header(&ta->resp_headers, "Content-Range",
+                            "bytes */%ld", (long)st.st_size);
+            http_add_header(&ta->resp_headers, "Content-Type", "text/plain");
+            buffer_appends(&ta->resp_body, "Range Not Satisfiable");
+            return send_response(ta);
+        }
+
+        ta->resp_status = HTTP_PARTIAL_CONTENT;
+        http_add_header(&ta->resp_headers, "Content-Range",
+                        "bytes %ld-%ld/%ld", (long)from, (long)to, (long)st.st_size);
+    } else {
+        ta->resp_status = HTTP_OK;
+    }
+
+    http_add_header(&ta->resp_headers, "Content-Type", "%s", guess_mime_type(fname));
     off_t content_length = to + 1 - from;
     add_content_length(&ta->resp_headers, content_length);
 
