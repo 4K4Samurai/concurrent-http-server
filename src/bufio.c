@@ -18,6 +18,7 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <string.h>
 #include <assert.h>
 
@@ -65,6 +66,15 @@ static ssize_t
 bytes_buffered(struct bufio *self)
 {
     return self->buf.len - self->bufpos;
+}
+
+/* Returns true if there is already-read data sitting in the buffer.
+ * Used by the epoll+threadpool loop to avoid re-arming epoll when
+ * a pipelined request is already buffered. */
+bool
+bufio_has_data(struct bufio *self)
+{
+    return bytes_buffered(self) > 0;
 }
 
 const int TRUNCATE_THRESHOLD = 10000;       // tune me

@@ -11,6 +11,8 @@
 #include <signal.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <errno.h>
+#include <sys/epoll.h>
 #include "buffer.h"
 #include "hexdump.h"
 #include "http.h"
@@ -37,14 +39,26 @@ int token_expiration_time = 24 * 60 * 60;
 char *server_root;
 
 /* ---------------------------------------------------------------------------
- * Work queue: a fixed-capacity ring buffer of accepted client fds.
- * The main thread enqueues; worker threads dequeue.
+ * Per-connection state.  Lives from accept() until the connection closes.
+ * --------------------------------------------------------------------------- */
+
+struct conn {
+    struct http_client client;
+    int fd;
+};
+
+/* epoll fd — global so worker threads can re-arm connections. */
+static int epoll_fd;
+
+/* ---------------------------------------------------------------------------
+ * Work queue: fixed-capacity ring buffer of conn pointers.
+ * Main/epoll thread enqueues; worker threads dequeue.
  * --------------------------------------------------------------------------- */
 
 #define QUEUE_CAP 4096
 
 static struct {
-    int      fds[QUEUE_CAP];
+    struct conn *conns[QUEUE_CAP];
     int      head, tail, count;
     bool     shutdown;
     pthread_mutex_t lock;
@@ -63,16 +77,17 @@ wq_init(void)
 }
 
 static void
-wq_push(int fd)
+wq_push(struct conn *conn)
 {
     pthread_mutex_lock(&wq.lock);
     while (wq.count == QUEUE_CAP && !wq.shutdown)
         pthread_cond_wait(&wq.not_full, &wq.lock);
 
     if (wq.shutdown) {
-        close(fd);
+        bufio_close(conn->client.bufio);
+        free(conn);
     } else {
-        wq.fds[wq.tail] = fd;
+        wq.conns[wq.tail] = conn;
         wq.tail = (wq.tail + 1) % QUEUE_CAP;
         wq.count++;
         pthread_cond_signal(&wq.not_empty);
@@ -80,50 +95,81 @@ wq_push(int fd)
     pthread_mutex_unlock(&wq.lock);
 }
 
-/* Returns -1 when shut down and queue is empty. */
-static int
+/* Returns NULL when shut down and queue is drained. */
+static struct conn *
 wq_pop(void)
 {
     pthread_mutex_lock(&wq.lock);
     while (wq.count == 0 && !wq.shutdown)
         pthread_cond_wait(&wq.not_empty, &wq.lock);
 
-    int fd = -1;
+    struct conn *conn = NULL;
     if (wq.count > 0) {
-        fd = wq.fds[wq.head];
+        conn = wq.conns[wq.head];
         wq.head = (wq.head + 1) % QUEUE_CAP;
         wq.count--;
         pthread_cond_signal(&wq.not_full);
     }
     pthread_mutex_unlock(&wq.lock);
-    return fd;
+    return conn;
 }
 
 /* ---------------------------------------------------------------------------
- * Worker thread: dequeues fds and handles HTTP transactions.
+ * Worker thread.
+ *
+ * Handles exactly ONE http_handle_transaction per wakeup, then either:
+ *   - re-arms the fd in epoll (keep-alive, no buffered data), or
+ *   - re-queues itself (keep-alive, pipelined data already buffered), or
+ *   - closes the connection.
  * --------------------------------------------------------------------------- */
+
+static void
+conn_rearm(struct conn *conn)
+{
+    struct epoll_event ev = {
+        .events   = EPOLLIN | EPOLLONESHOT,
+        .data.ptr = conn,
+    };
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &ev) == -1) {
+        bufio_close(conn->client.bufio);
+        free(conn);
+    }
+}
 
 static void *
 worker(void *arg)
 {
     (void)arg;
     for (;;) {
-        int fd = wq_pop();
-        if (fd == -1)
+        struct conn *conn = wq_pop();
+        if (!conn)
             break;
 
-        struct http_client client;
-        http_setup_client(&client, bufio_create(fd));
-        while (http_handle_transaction(&client))
-            ;
-        bufio_close(client.bufio);
+        bool keep = http_handle_transaction(&conn->client);
+        if (!keep) {
+            bufio_close(conn->client.bufio);
+            free(conn);
+            continue;
+        }
+
+        /* Keep-alive: if a pipelined request is already in bufio's buffer,
+         * dispatch directly back to the thread pool to avoid missing it
+         * (epoll won't fire again since the socket buffer may be empty). */
+        if (bufio_has_data(conn->client.bufio))
+            wq_push(conn);
+        else
+            conn_rearm(conn);
     }
     return NULL;
 }
 
 /* ---------------------------------------------------------------------------
- * Main accept loop + thread pool management.
+ * epoll accept loop + thread pool management.
  * --------------------------------------------------------------------------- */
+
+/* Sentinel: the accept socket's epoll event uses this as data.ptr so we can
+ * distinguish it from client conn pointers. */
+static struct conn accept_sentinel;
 
 static void
 server_loop(char *port_string)
@@ -135,10 +181,7 @@ server_loop(char *port_string)
     wq_init();
 
     pthread_t *threads = malloc(nthreads * sizeof(pthread_t));
-    if (!threads) {
-        perror("malloc");
-        return;
-    }
+    if (!threads) { perror("malloc"); return; }
 
     for (int i = 0; i < nthreads; i++) {
         if (pthread_create(&threads[i], NULL, worker, NULL) != 0) {
@@ -148,15 +191,63 @@ server_loop(char *port_string)
         }
     }
 
+    epoll_fd = epoll_create1(0);
+    if (epoll_fd == -1) { perror("epoll_create1"); return; }
+
     int accepting_socket = socket_open_bind_listen(port_string, 10000);
-    while (accepting_socket != -1) {
-        int fd = socket_accept_client(accepting_socket);
-        if (fd == -1)
-            break;
-        wq_push(fd);
+    if (accepting_socket == -1) return;
+
+    /* Register the accept socket — level-triggered, no ONESHOT. */
+    struct epoll_event ev = {
+        .events   = EPOLLIN,
+        .data.ptr = &accept_sentinel,
+    };
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, accepting_socket, &ev) == -1) {
+        perror("epoll_ctl ADD accept");
+        return;
     }
 
-    /* Signal workers to drain and exit. */
+    #define MAX_EVENTS 64
+    struct epoll_event events[MAX_EVENTS];
+
+    for (;;) {
+        int n = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
+        if (n == -1) {
+            if (errno == EINTR) continue;
+            perror("epoll_wait");
+            break;
+        }
+
+        for (int i = 0; i < n; i++) {
+            if (events[i].data.ptr == &accept_sentinel) {
+                /* New connection. */
+                int fd = socket_accept_client(accepting_socket);
+                if (fd == -1) continue;
+
+                struct conn *conn = malloc(sizeof *conn);
+                if (!conn) { close(fd); continue; }
+
+                conn->fd = fd;
+                http_setup_client(&conn->client, bufio_create(fd));
+
+                struct epoll_event cev = {
+                    .events   = EPOLLIN | EPOLLONESHOT,
+                    .data.ptr = conn,
+                };
+                if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &cev) == -1) {
+                    perror("epoll_ctl ADD client");
+                    bufio_close(conn->client.bufio);
+                    free(conn);
+                }
+            } else {
+                /* Existing connection has data — hand off to thread pool. */
+                struct conn *conn = events[i].data.ptr;
+                wq_push(conn);
+            }
+        }
+    }
+
+    /* Shutdown: wake all workers and wait for them. */
     pthread_mutex_lock(&wq.lock);
     wq.shutdown = true;
     pthread_cond_broadcast(&wq.not_empty);
@@ -166,6 +257,7 @@ server_loop(char *port_string)
         pthread_join(threads[i], NULL);
 
     free(threads);
+    close(epoll_fd);
 }
 
 static void
