@@ -855,6 +855,8 @@ http_handle_transaction(struct http_client *self)
             free(claims);
             rc = handle_static_asset(&ta, server_root);
         }
+    } else {
+        rc = handle_static_asset(&ta, server_root);
     }
 
     buffer_delete(&ta.resp_headers);
