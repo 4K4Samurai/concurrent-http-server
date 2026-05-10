@@ -46,7 +46,7 @@ static int epoll_fd;
  *   - Cache locality (same conn always handled by same worker)
  * --------------------------------------------------------------------------- */
 
-#define NWORKERS         64       /* must be power of 2 for fast mod */
+#define NWORKERS         128      /* must be power of 2 for fast mod */
 #define WORKER_QUEUE_CAP 4096
 
 struct worker_state {
