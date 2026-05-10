@@ -152,13 +152,7 @@ worker(void *arg)
             continue;
         }
 
-        /* Keep-alive: if a pipelined request is already in bufio's buffer,
-         * dispatch directly back to the thread pool to avoid missing it
-         * (epoll won't fire again since the socket buffer may be empty). */
-        if (bufio_has_data(conn->client.bufio))
-            wq_push(conn);
-        else
-            conn_rearm(conn);
+        conn_rearm(conn);
     }
     return NULL;
 }
