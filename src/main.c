@@ -55,7 +55,7 @@ static int epoll_fd;
  * Main/epoll thread enqueues; worker threads dequeue.
  * --------------------------------------------------------------------------- */
 
-#define QUEUE_CAP 4096
+#define QUEUE_CAP 16384
 
 static struct {
     struct conn *conns[QUEUE_CAP];
@@ -174,9 +174,9 @@ static struct conn accept_sentinel;
 static void
 server_loop(char *port_string)
 {
-    int nthreads = (int)sysconf(_SC_NPROCESSORS_ONLN);
-    if (nthreads < 1)
-        nthreads = 4;
+    int nthreads = (int)sysconf(_SC_NPROCESSORS_ONLN) * 4;
+    if (nthreads < 64)
+        nthreads = 64;
 
     wq_init();
 
@@ -207,7 +207,7 @@ server_loop(char *port_string)
         return;
     }
 
-    #define MAX_EVENTS 64
+    #define MAX_EVENTS 256
     struct epoll_event events[MAX_EVENTS];
 
     for (;;) {
