@@ -818,7 +818,7 @@ handle_api(struct http_transaction *ta)
 {
     char *req_path = bufio_offset2ptr(ta->client->bufio, ta->req_path);
 
-    if (STARTS_WITH(req_path, "/api/login"))
+    if (!strcmp(req_path, "/api/login"))
     {
         if (ta->req_method == HTTP_POST)
         {
@@ -830,12 +830,12 @@ handle_api(struct http_transaction *ta)
         }
     }
 
-    if (STARTS_WITH(req_path, "/api/logout"))
+    if (!strcmp(req_path, "/api/logout"))
     {
         return handle_logout(ta);
     }
 
-    if (STARTS_WITH(req_path, "/api/video"))
+    if (!strcmp(req_path, "/api/video"))
     {
         return handle_video_api(ta);
     }
