@@ -821,22 +821,23 @@ handle_api(struct http_transaction *ta)
     if (!strcmp(req_path, "/api/login"))
     {
         if (ta->req_method == HTTP_POST)
-        {
             return handle_login(ta);
-        }
-        else
-        {
+        if (ta->req_method == HTTP_GET)
             return handle_login_get(ta);
-        }
+        return send_error(ta, HTTP_METHOD_NOT_ALLOWED, "Method not allowed.");
     }
 
     if (!strcmp(req_path, "/api/logout"))
     {
+        if (ta->req_method != HTTP_POST)
+            return send_error(ta, HTTP_METHOD_NOT_ALLOWED, "Method not allowed.");
         return handle_logout(ta);
     }
 
     if (!strcmp(req_path, "/api/video"))
     {
+        if (ta->req_method != HTTP_GET)
+            return send_error(ta, HTTP_METHOD_NOT_ALLOWED, "Method not allowed.");
         return handle_video_api(ta);
     }
 
