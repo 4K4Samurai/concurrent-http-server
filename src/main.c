@@ -155,8 +155,8 @@ worker(void *arg)
 static void
 server_loop(char *port_string)
 {
-    int nthreads = (int)sysconf(_SC_NPROCESSORS_ONLN) * 8;
-    if (nthreads < 128) nthreads = 128;
+    int nthreads = (int)sysconf(_SC_NPROCESSORS_ONLN) * 4;
+    if (nthreads < 64) nthreads = 64;
 
     epoll_fd = epoll_create1(0);
     if (epoll_fd == -1) { perror("epoll_create1"); return; }
