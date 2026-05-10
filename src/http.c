@@ -401,7 +401,7 @@ handle_static_asset(struct http_transaction *ta, char *basedir)
     // Block path traversal attacks
     if (strstr(req_path, ".."))
     {
-        return send_error(ta, HTTP_PERMISSION_DENIED, "Permission denied.");
+        return send_error(ta, HTTP_NOT_FOUND, "Not found.");
     }
 
     // Need an HTML5 fallback so that it can resolve what file to actually serve
