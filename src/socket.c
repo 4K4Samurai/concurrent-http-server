@@ -46,7 +46,7 @@ socket_open_bind_listen(char * port_number_string, int backlog)
     hint.ai_flags = AI_PASSIVE |    // we're looking for an address to bind to
                     AI_NUMERICSERV; // service port is numeric, don't look in /etc/services
 
-    hint.ai_family = AF_INET6; // dual-bind allows to also accept IPv4 clients too
+    hint.ai_family = AF_UNSPEC;     // accept both IPv4 and IPv6 addresses
 
     hint.ai_protocol = IPPROTO_TCP; // only interested in TCP
     int rc = getaddrinfo(NULL, port_number_string, &hint, &info);
@@ -56,56 +56,57 @@ socket_open_bind_listen(char * port_number_string, int backlog)
     }
 
     char printed_addr[1024];
-    for (pinfo = info; pinfo; pinfo = pinfo->ai_next) {
-        assert (pinfo->ai_protocol == IPPROTO_TCP);
-        int rc = getnameinfo(pinfo->ai_addr, pinfo->ai_addrlen,
-                             printed_addr, sizeof printed_addr, NULL, 0,
-                             NI_NUMERICHOST);
-        if (rc != 0) {
-            fprintf(stderr, "getnameinfo error: %s\n", gai_strerror(rc));
-            return -1;
+
+    // Two-pass: prefer IPv6 (with IPV6_V6ONLY=0 for dual-stack), fall back to IPv4.
+    for (int pass = 0; pass < 2; pass++) {
+        int want_family = (pass == 0) ? AF_INET6 : AF_INET;
+
+        for (pinfo = info; pinfo; pinfo = pinfo->ai_next) {
+            if (pinfo->ai_family != want_family)
+                continue;
+
+            assert (pinfo->ai_protocol == IPPROTO_TCP);
+            int grc = getnameinfo(pinfo->ai_addr, pinfo->ai_addrlen,
+                                 printed_addr, sizeof printed_addr, NULL, 0,
+                                 NI_NUMERICHOST);
+            if (grc != 0) {
+                fprintf(stderr, "getnameinfo error: %s\n", gai_strerror(grc));
+                continue;
+            }
+
+            int s = socket(pinfo->ai_family, pinfo->ai_socktype, pinfo->ai_protocol);
+            if (s == -1) {
+                perror("socket");
+                continue;
+            }
+
+            int opt = 1;
+            setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+            // On IPv6 sockets, disable v6-only so IPv4-mapped clients are also accepted.
+            if (pinfo->ai_family == AF_INET6) {
+                int off = 0;
+                setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof(off));
+            }
+
+            if (bind(s, pinfo->ai_addr, pinfo->ai_addrlen) == -1) {
+                perror("bind");
+                close(s);
+                continue;
+            }
+
+            if (listen(s, backlog) == -1) {
+                perror("listen");
+                close(s);
+                continue;
+            }
+
+            freeaddrinfo(info);
+            return s;
         }
-
-        /* Uncomment this to see the address returned
-        printf("%s: %s\n", pinfo->ai_family == AF_INET ? "AF_INET" :
-                           pinfo->ai_family == AF_INET6 ? "AF_INET6" : "?", 
-                           printed_addr);
-        */
-
-        /* Skip any non-IPv4 addresses.  
-         * Adding support for protocol independence/IPv6 is part of the project.
-         */
-
-        int s = socket(pinfo->ai_family, pinfo->ai_socktype, pinfo->ai_protocol);
-        if (s == -1) {
-            perror("socket");
-            return -1;
-        }
-
-        // See https://stackoverflow.com/a/3233022 for a good explanation of what this does
-        int opt = 1;
-        setsockopt (s, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof (opt));
-
-        int off = 0;
-        setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof(off));
-
-        rc = bind(s, pinfo->ai_addr, pinfo->ai_addrlen);
-        if (rc == -1) {
-            perror("bind");
-            close(s);
-            return -1;
-        }
-
-        rc = listen(s, backlog);
-        if (rc == -1) {
-            perror("listen");
-            close(s);
-            return -1;
-        }
-
-        freeaddrinfo(info);
-        return s;
     }
+
+    freeaddrinfo(info);
     fprintf(stderr, "No suitable address to bind port %s found\n", port_number_string);
     return -1;
 }
