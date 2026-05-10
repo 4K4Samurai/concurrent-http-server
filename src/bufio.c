@@ -216,10 +216,16 @@ bufio_sendfile(struct bufio *self, int fd, off_t *off, size_t filesize)
  * Send data contained in 'resp' to the socket.
  * See send(2) for return value.
  */
-ssize_t 
+ssize_t
 bufio_sendbuffer(struct bufio *self, buffer_t *resp)
 {
     return send(self->socket, resp->buf, resp->len, MSG_NOSIGNAL);
+}
+
+ssize_t
+bufio_send_raw(struct bufio *self, const void *data, size_t len)
+{
+    return send(self->socket, data, len, MSG_NOSIGNAL);
 }
 
 /*

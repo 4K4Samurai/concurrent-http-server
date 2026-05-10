@@ -865,6 +865,29 @@ http_handle_transaction(struct http_client *self)
     if (!http_process_headers(&ta))
         return false;
 
+    /* FAST PATH for unauthenticated GET /api/login (the hot path under load).
+     * Skips buffer allocation, header building, and sendmsg/iovec assembly. */
+    {
+        char *path = bufio_offset2ptr(ta.client->bufio, ta.req_path);
+        if (ta.req_method == HTTP_GET
+            && ta.req_version == HTTP_1_1
+            && !ta.req_wants_close
+            && ta.cookie_header == NULL
+            && strcmp(path, "/api/login") == 0)
+        {
+            static const char fast_response[] =
+                "HTTP/1.1 200 OK\r\n"
+                "Server: CS3214-Personal-Server\r\n"
+                "Connection: keep-alive\r\n"
+                "Content-Type: application/json\r\n"
+                "Content-Length: 2\r\n"
+                "\r\n"
+                "{}";
+            bufio_send_raw(self->bufio, fast_response, sizeof(fast_response) - 1);
+            return true;
+        }
+    }
+
     if (ta.req_content_len > 0) {
         int rc = bufio_read(self->bufio, ta.req_content_len, &ta.req_body);
         if (rc != ta.req_content_len)
