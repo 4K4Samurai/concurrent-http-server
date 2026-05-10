@@ -196,25 +196,26 @@ server_loop(char *port_string)
 
         for (int i = 0; i < n; i++) {
             if (events[i].data.ptr == &accept_sentinel) {
-                /* Drain accept queue. */
-                for (;;) {
-                    int fd = socket_accept_client(accepting_socket);
-                    if (fd == -1) break;
+                /* Single accept per event; the listen socket is
+                 * level-triggered so epoll_wait fires again if there
+                 * are more pending connections. socket_accept_client
+                 * uses a blocking accept(), so we cannot loop here. */
+                int fd = socket_accept_client(accepting_socket);
+                if (fd == -1) continue;
 
-                    struct conn *conn = malloc(sizeof *conn);
-                    if (!conn) { close(fd); continue; }
+                struct conn *conn = malloc(sizeof *conn);
+                if (!conn) { close(fd); continue; }
 
-                    conn->fd = fd;
-                    http_setup_client(&conn->client, bufio_create(fd));
+                conn->fd = fd;
+                http_setup_client(&conn->client, bufio_create(fd));
 
-                    struct epoll_event cev = {
-                        .events   = EPOLLIN | EPOLLONESHOT,
-                        .data.ptr = conn,
-                    };
-                    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &cev) == -1) {
-                        bufio_close(conn->client.bufio);
-                        free(conn);
-                    }
+                struct epoll_event cev = {
+                    .events   = EPOLLIN | EPOLLONESHOT,
+                    .data.ptr = conn,
+                };
+                if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &cev) == -1) {
+                    bufio_close(conn->client.bufio);
+                    free(conn);
                 }
             } else {
                 dispatch(events[i].data.ptr);
