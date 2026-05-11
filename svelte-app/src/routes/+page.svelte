@@ -7,7 +7,7 @@
 
 <Container>
 	<Row class="mt-4">
-		<h1>CS3214 Demo App</h1>
+		<h1>CS3214 Demo App by <tt>dinmukhamed</tt> and <tt>kgcabanacan</tt></h1>
 	</Row>
 	<Row>
 		<Col xs={{ size: 9 }} md={{ size: 6 }}>
